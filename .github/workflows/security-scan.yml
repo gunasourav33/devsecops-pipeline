@@ -1,0 +1,154 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 3 * * 6'
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    name: Secret Scanning (Gitleaks)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: true
+
+      - name: Notify Slack on failure
+        if: failure() && github.ref == 'refs/heads/main'
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          payload: |
+            {"text": "Secret scan failed on ${{ github.repository }} — check run ${{ github.run_id }}"}
+
+  sast:
+    runs-on: ubuntu-latest
+    name: SAST (Bandit)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Run Bandit
+        run: |
+          pip install bandit==1.7.5
+          bandit -r app/ -f json -o bandit-report.json || true
+
+      - name: Fail on HIGH severity
+        run: |
+          python -c "
+          import json, sys
+          data = json.load(open('bandit-report.json'))
+          high = [r for r in data.get('results', []) if r['issue_severity'] == 'HIGH']
+          if high:
+              print(f'{len(high)} high severity issues found')
+              sys.exit(1)
+          "
+
+      - name: Upload report
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: bandit-report
+          path: bandit-report.json
+
+      - name: Notify on critical
+        if: failure() && github.ref == 'refs/heads/main'
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          payload: |
+            {"text": "SAST critical findings in ${{ github.repository }} — run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    name: Dependency CVE Check (pip-audit)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Run pip-audit
+        run: |
+          pip install pip-audit==2.4.14
+          pip-audit -r requirements.txt --desc --format json -o pip-audit-report.json || true
+
+      - name: Fail on fixable CVEs
+        run: |
+          python -c "
+          import json, sys
+          data = json.load(open('pip-audit-report.json'))
+          vulns = [v for v in data.get('dependencies', []) if v.get('vulns')]
+          if vulns:
+              for v in vulns:
+                  print(f"{v['name']}: {[x['id'] for x in v['vulns']]}")
+              sys.exit(1)
+          "
+
+      - name: Upload audit report
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: pip-audit-report
+          path: pip-audit-report.json
+
+  container-scan:
+    runs-on: ubuntu-latest
+    name: Container Scan (Trivy)
+    needs: [secret-scan, sast, dependency-audit]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image for scanning
+        run: docker build -t app:scan .
+
+      - name: Trivy container scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: app:scan
+          format: sarif
+          output: container-scan.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: container-scan.sarif
+          category: trivy-container
+
+  iac-scan:
+    runs-on: ubuntu-latest
+    name: IaC Scan (Trivy config)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy Dockerfile scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: Dockerfile
+          format: sarif
+          output: iac-scan.sarif
+
+      - name: Upload IaC SARIF
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: iac-scan.sarif
+          category: trivy-iac
