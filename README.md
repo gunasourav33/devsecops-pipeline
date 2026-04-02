@@ -1,5 +1,7 @@
 # DevSecOps Pipeline
 
+![Security Scan](https://github.com/gunasourav33/devsecops-pipeline/actions/workflows/security-scan.yml/badge.svg) ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg) ![Python](https://img.shields.io/badge/python-3.11-blue.svg) ![Trivy](https://img.shields.io/badge/trivy-enabled-red.svg)
+
 Security gates integrated into the CI/CD pipeline. This isn't bolted on after the fact — it's part of the workflow from commit to deploy.
 
 ## What gets scanned
